@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
                      ValidationError)
 from .service import Service
+from .verification import VerificationConflict
 
 
 def make_handler(service: Service, static_dir: str):
@@ -57,7 +58,9 @@ def make_handler(service: Service, static_dir: str):
             return value
 
         def _send_error(self, exc: Exception) -> None:
-            if isinstance(exc, ValidationError):
+            if isinstance(exc, VerificationConflict):
+                status = 409
+            elif isinstance(exc, ValidationError):
                 status = 422
             elif isinstance(exc, NotFoundError):
                 status = 404
@@ -71,7 +74,10 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            payload = {"error": exc.__class__.__name__, "message": str(exc)}
+            if isinstance(exc, VerificationConflict):
+                payload["missing"] = exc.missing
+            self._json(status, payload)
 
         def do_GET(self) -> None:
             try:
@@ -84,6 +90,16 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"items": service.list_items(role)})
+                elif path.startswith("/api/items/") and path.endswith("/verifications"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"entries": service.list_verifications(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/verification-status"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.verification_status(item_id, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     actor, role = self._identity()
@@ -110,6 +126,12 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path.startswith("/api/verifications/") and path.endswith("/corrections"):
+                    entry_id = int(path.split("/")[3])
+                    self._json(200, service.correct_verification(entry_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/verifications"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.register_verification(item_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))

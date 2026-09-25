@@ -123,6 +123,22 @@ class Repository:
                 raise ConflictError("版本冲突，请刷新后重试")
         return self.get_item(item_id)
 
+    def reopen_to_monitoring(self, item_id: int, actor: str) -> Dict[str, Any]:
+        """处置核验原始记录更正后，已关闭事件回到待复核（monitoring）。"""
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE items SET status='monitoring', version=version+1, updated_at=?
+                   WHERE id=? AND status='closed'""",
+                (now, item_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("项目不存在")
+                return self.get_item(item_id)
+        return self.get_item(item_id)
+
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
                    external_ref: Optional[str], actor: str) -> Dict[str, Any]:
         now = utc_now()
