@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .disposal_ledger import DisposalLedger, validate_record_fields
+from .disposal_verification import verify_disposal
+from .domain import (ConflictError, ensure_role, normalize_severity,
+                     require_number, require_text)
 from .repository import Repository
 from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
                     VIEW_ROLES, completion_blockers, escalation_required,
@@ -11,8 +14,9 @@ from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
 
 
 class Service:
-    def __init__(self, repository: Repository):
+    def __init__(self, repository: Repository, ledger: Optional[DisposalLedger] = None):
         self.repository = repository
+        self.ledger = ledger or DisposalLedger(repository.conn, repository.lock)
 
     def _view(self, role: str) -> None:
         ensure_role(role, VIEW_ROLES)
@@ -65,8 +69,16 @@ class Service:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
+        if target == "closed":
+            verification = verify_disposal(item["quantity"],
+                                           self.ledger.active_records(item_id))
+            self.ledger.add_conclusion(
+                item_id, "passed" if verification["ok"] else "failed", actor,
+                verification=verification)
+            if not verification["ok"]:
+                raise ConflictError(
+                    "处置核验未通过，缺少：" + "、".join(verification["missing_labels"]))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
             "from": item["status"], "to": target,
@@ -78,6 +90,76 @@ class Service:
     def get_item(self, item_id: int, role: str) -> Dict[str, Any]:
         self._view(role)
         return self.enrich(self.repository.get_item(item_id))
+
+    def add_disposal_record(self, item_id: int, payload: Dict[str, Any], actor: str,
+                            role: str) -> Dict[str, Any]:
+        ensure_role(role, RECORD_ROLES)
+        actor = require_text(actor, "actor", 100)
+        self.repository.get_item(item_id)
+        fields = validate_record_fields(
+            payload.get("kind"), quantity=payload.get("quantity"),
+            result=payload.get("result"), destination=payload.get("destination"),
+            transfer_status=payload.get("transfer_status"),
+            handler=payload.get("handler"), note=payload.get("note"))
+        record = self.ledger.add_record(item_id, fields, actor)
+        self.repository.append_audit("disposal_record", ENTITY, item_id, actor, {
+            "record_id": record["id"], "kind": record["kind"],
+            "handler": record["handler"],
+        })
+        return record
+
+    def list_disposal_records(self, item_id: int, role: str) -> list:
+        self._view(role)
+        self.repository.get_item(item_id)
+        return self.ledger.list_records(item_id)
+
+    def disposal_verification(self, item_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        item = self.repository.get_item(item_id)
+        result = verify_disposal(item["quantity"], self.ledger.active_records(item_id))
+        result["item_id"] = item_id
+        result["item_status"] = item["status"]
+        return result
+
+    def list_disposal_conclusions(self, item_id: int, role: str) -> list:
+        self._view(role)
+        self.repository.get_item(item_id)
+        return self.ledger.list_conclusions(item_id)
+
+    def correct_disposal_record(self, record_id: int, payload: Dict[str, Any],
+                                actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, RECORD_ROLES)
+        actor = require_text(actor, "actor", 100)
+        old = self.ledger.get_record(record_id)
+        fields = validate_record_fields(
+            old["kind"],
+            quantity=payload.get("quantity", old["quantity"]),
+            result=payload.get("result", old["result"]),
+            destination=payload.get("destination", old["destination"]),
+            transfer_status=payload.get("transfer_status", old["transfer_status"]),
+            handler=payload.get("handler", old["handler"]),
+            note=payload.get("note", old["note"]))
+        new_record = self.ledger.correct_record(record_id, fields, actor)
+        item = self.repository.get_item(old["item_id"])
+        reopened = False
+        if item["status"] == "closed":
+            self.repository.transition_item(item["id"], "pending_review",
+                                            item["version"], actor)
+            self.ledger.add_conclusion(
+                item["id"], "reopened", actor,
+                detail={"record_id": record_id, "new_record_id": new_record["id"]})
+            self.repository.append_audit("transition", ENTITY, item["id"], actor, {
+                "from": "closed", "to": "pending_review",
+                "reason": "disposal_record_corrected", "record_id": record_id,
+            })
+            reopened = True
+        self.repository.append_audit("disposal_correct", ENTITY, old["item_id"], actor, {
+            "record_id": record_id, "new_record_id": new_record["id"],
+            "reopened": reopened,
+        })
+        return {"record": new_record, "superseded_id": record_id,
+                "reopened": reopened,
+                "item_status": "pending_review" if reopened else item["status"]}
 
     def list_items(self, role: str, status: Optional[str] = None) -> list:
         self._view(role)

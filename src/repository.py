@@ -22,6 +22,10 @@ class Repository:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self._create_schema()
 
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
     def _create_schema(self) -> None:
         statuses = ",".join("'" + s.replace("'", "''") + "'" for s in STATES)
         with self.conn:

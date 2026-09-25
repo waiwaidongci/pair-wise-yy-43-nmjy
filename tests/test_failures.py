@@ -16,6 +16,6 @@ class FailureTest(unittest.TestCase):
         self.service.add_record(self.item["id"],payload,"recorder",'response_commander')
         with self.assertRaises(ConflictError): self.service.add_record(self.item["id"],payload,"recorder",'response_commander')
         current=self.service.get_item(self.item["id"],"viewer")
-        for target in STATES[1:-1]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
-        with self.assertRaises(ConflictError): self.service.transition(current["id"],STATES[-1],current["version"],"reviewer",TRANSITION_ROLES[STATES[-1]][0])
+        for target in ["assessing","containing","recovering","monitoring"]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
+        with self.assertRaises(ConflictError): self.service.transition(current["id"],"closed",current["version"],"reviewer",TRANSITION_ROLES["closed"][0])
 if __name__=="__main__": unittest.main()

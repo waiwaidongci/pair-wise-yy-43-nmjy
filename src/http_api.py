@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from . import disposal_api
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
                      ValidationError)
 from .service import Service
@@ -76,6 +77,11 @@ def make_handler(service: Service, static_dir: str):
         def do_GET(self) -> None:
             try:
                 path = urlparse(self.path).path
+                actor, role = self._identity()
+                handled = disposal_api.handle(service, "GET", path, {}, actor, role)
+                if handled is not None:
+                    self._json(handled[0], handled[1])
+                    return
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
@@ -108,6 +114,10 @@ def make_handler(service: Service, static_dir: str):
                 path = urlparse(self.path).path
                 actor, role = self._identity()
                 body = self._body()
+                handled = disposal_api.handle(service, "POST", path, body, actor, role)
+                if handled is not None:
+                    self._json(handled[0], handled[1])
+                    return
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
